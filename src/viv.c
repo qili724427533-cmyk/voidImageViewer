@@ -22,6 +22,10 @@
 // VoidImageViewer
 
 // TODO:
+// right click rename 
+// right click open with
+// [HIGH] rotate images in memory only
+// [HIGH] right click preview on windows xp fails with: the parameter is incorrect.
 // [HIGH] right click O conflict options or sort?
 // [HIGH] language_id needs to go in translation. we don't want to check for it in code.. has to be a list too, to support multiple language ids
 // [HIGH] Help -> About viv -> Credits
@@ -37,6 +41,7 @@
 // option to not reset the zoom when the image changes.?
 // .rc localization
 // SVG support -Librsvg?
+// AVIF
 // GDI/GDI+ is limited to 2GB (wide*high*4), work out a workaround for large images.
 // compile on mingw
 // Undo option, after delete, undo the delete and re-add the image to the playlist.
@@ -234,6 +239,7 @@
 // *option to show full path like MPC. (by hesphoros)
 // *fix controls in view options page being 1 pixel too long
 // *fix jump-to up/down focus
+// *validate frame delay data
 
 
 #define _VIV_WM_REPLY							(WM_USER+1)
@@ -432,6 +438,12 @@ typedef struct _viv_webp_s
 	int orientation;
 	
 }_viv_webp_t;
+
+typedef struct _viv_name_mapping_s
+{
+	UINT count;
+	SHNAMEMAPPING *mappings;
+}_viv_name_mapping_t;
 
 static void _viv_update_title(void);
 static void _viv_on_size(void);
@@ -636,6 +648,7 @@ static void _viv_open_preload(void);
 //static void _viv_tooltip_hide(void);
 //static void _viv_tooltip_update(void);
 //static void _viv_tooltip_update_track_position(void);
+static int _viv_safe_copy_data(const void *base,SIZE_T src_size,const void *src,void *dst,SIZE_T dst_size);
 
 static HMODULE _viv_stobject_hmodule = 0;
 static _viv_playlist_t *_viv_playlist_start = 0;
@@ -666,7 +679,9 @@ static int _viv_view_y = 0; // the current image offset in pixels
 static double _viv_view_ix = 0.0; // the current image offset in percent, used when resizing the window
 static double _viv_view_iy = 0.0; // the current image offset in percent, used when resizing the window
 static int _viv_zoom_pos = 0; // the current zoom level
-static float _viv_zoom_presets[_VIV_ZOOM_MAX] = {0.004815f,0.019215f,0.043060f,0.076120f,0.118079f,0.168530f,0.226989f,0.292893f,0.365607f,0.444430f,0.528603f,0.617316f,0.709715f,0.804909f,0.901983f,1.000000f}; // (1 - cos(((float)(x+1) * 1.570796f) / _VIV_ZOOM_MAX)) // this is missing cos((1 * 1.570796f) / _VIV_ZOOM_MAX), which is too small
+//static float _viv_zoom_presets[_VIV_ZOOM_MAX] = {0.004815f,0.019215f,0.043060f,0.076120f,0.118079f,0.168530f,0.226989f,0.292893f,0.365607f,0.444430f,0.528603f,0.617316f,0.709715f,0.804909f,0.901983f,1.000000f}; // (1 - cos(((float)(x+1) * 1.570796f) / _VIV_ZOOM_MAX)) // this is missing cos((1 * 1.570796f) / _VIV_ZOOM_MAX), which is too small
+static float _viv_zoom_presets[_VIV_ZOOM_MAX] = {0.0000,0.0100,0.0225,0.0379,0.0569,0.0806,0.1098,0.1461,0.1909,0.2465,0.3154,0.4007,0.5063,0.6372,0.7993,1.0000}; // 0.01 - 0.2 curve
+
 static ULONG_PTR os_GdiplusToken; // gdiplus handle
 static int _viv_image_wide = 0; // current image width
 static int _viv_image_high = 0; // current image width
@@ -1095,7 +1110,9 @@ WORD _viv_context_menu_items[] =
 	VIV_ID_EDIT_CUT,
 	VIV_ID_EDIT_COPY,
 	VIV_ID_EDIT_COPY_IMAGE,
+	0,
 	VIV_ID_FILE_DELETE,
+	VIV_ID_FILE_RENAME,
 	0,
 	VIV_ID_FILE_PROPERTIES,
 	VIV_ID_VIEW_OPTIONS,
@@ -7271,23 +7288,45 @@ static INT_PTR CALLBACK _viv_rename_proc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM
 						fo.wFunc = FO_RENAME;
 						fo.pFrom = old_filename_list;
 						fo.pTo = new_filename_list;
-						fo.fFlags = FOF_ALLOWUNDO;
+						fo.fFlags = FOF_ALLOWUNDO | FOF_WANTMAPPINGHANDLE;
 
 						if (SHFileOperation(&fo) == 0)
 						{
 							if (!fo.fAnyOperationsAborted)
 							{	
-								// has the filename changed? slideshow could make this a different filename
+								const wchar_t *file_op_new_name;
+								
+								file_op_new_name = new_full_path_and_filename;
+								
+								if (fo.hNameMappings)
+								{
+									_viv_name_mapping_t *mappings;
+									
+									mappings = (_viv_name_mapping_t *)fo.hNameMappings;
+										
+									if (mappings->count == 1)
+									{
+										// use the resolved name incase there was a rename collision.
+										file_op_new_name = mappings->mappings[0].pszNewPath;
+									}
+								}	
+								
+								// has the current file changed? slideshow could make this a different filename
 								if (string_compare(old_filename,_viv_current_fd->cFileName) == 0)
 								{
 									// rename
-									string_copy(_viv_current_fd->cFileName,new_full_path_and_filename);
+									string_copy_with_bufsize(_viv_current_fd->cFileName,MAX_PATH,file_op_new_name);
 									
-									_viv_playlist_rename(old_filename,new_full_path_and_filename);
+									_viv_playlist_rename(old_filename,file_op_new_name);
 
 									_viv_update_title();
-								}
+								}						
 							}
+
+							if (fo.hNameMappings)
+							{
+								SHFreeNameMappings(fo.hNameMappings);
+							}							
 						}
 					}
 
@@ -10488,8 +10527,10 @@ static DWORD WINAPI _viv_load_image_thread_proc(void *param)
 							if (os_GdipImageGetFrameDimensionsCount(image,&count) == 0)
 							{
 								os_PropertyItem_t *frame_delay;
+								SIZE_T frame_delay_size;
 								
 								frame_delay = NULL;
+								frame_delay_size = 0;
 								
 								//Now we should get the identifiers for the frame dimensions 
 								{
@@ -10522,6 +10563,7 @@ static DWORD WINAPI _viv_load_image_thread_proc(void *param)
 									debug_printf("frame delay size %d\n",size);
 
 									frame_delay = (os_PropertyItem_t *)mem_alloc(size);
+									frame_delay_size = size;
 									
 									// PropertyTagFrameDelay 0x5100
 									os_GdipGetPropertyItem(image,0x5100,size,frame_delay);
@@ -10636,10 +10678,19 @@ static DWORD WINAPI _viv_load_image_thread_proc(void *param)
 														_viv_frame_t frame;
 														int mip_wide;
 														int mip_high;
+														UINT frame_data_value;
 
 														frame.hbitmap = hbitmap;
 														frame.mipmap = NULL;
-														frame.delay = (((UINT *)frame_delay[0].value)[i]) * 10;
+														
+														// therube: we are accessing bad data here for some images.
+														// just use a value of 0 for bad data.
+														if (!_viv_safe_copy_data(frame_delay,frame_delay_size,&(((UINT *)frame_delay[0].value)[i]),&frame_data_value,sizeof(UINT)))
+														{
+															frame_data_value = 0;
+														}
+														
+														frame.delay = frame_data_value * 10;
 															
 														if (!frame.delay)
 														{
@@ -10654,6 +10705,7 @@ static DWORD WINAPI _viv_load_image_thread_proc(void *param)
 													{
 														int mip_wide;
 														int mip_high;
+														UINT frame_data_value;
 
 														first_frame.frame.hbitmap = hbitmap;
 														first_frame.frame.mipmap = NULL;
@@ -10661,7 +10713,14 @@ static DWORD WINAPI _viv_load_image_thread_proc(void *param)
 														
 														if (first_frame.frame_count > 1)
 														{
-															first_frame.frame.delay = (((UINT *)frame_delay[0].value)[i]) * 10;
+															// therube: we are accessing bad data here for some images.
+															// just use a value of 0 for bad data.
+															if (!_viv_safe_copy_data(frame_delay,frame_delay_size,&(((UINT *)frame_delay[0].value)[i]),&frame_data_value,sizeof(UINT)))
+															{
+																frame_data_value = 0;
+															}
+															
+															first_frame.frame.delay = frame_data_value * 10;
 															
 															if (!first_frame.frame.delay)
 															{
@@ -15207,3 +15266,41 @@ static void _viv_tooltip_update_track_position(void)
 	}
 }
 */
+
+static int _viv_safe_copy_data(const void *base,SIZE_T src_size,const void *src,void *dst,SIZE_T dst_size)
+{
+	const BYTE *p;
+	BYTE *d;
+	SIZE_T run;
+	SIZE_T end;
+	
+	if (((const BYTE *)src) < ((const BYTE *)base))
+	{
+		return 0;
+	}
+	
+	end = safe_size_add(((const BYTE *)src) - ((const BYTE *)base),dst_size);
+	
+	if (end == SIZE_MAX)
+	{
+		return 0;
+	}
+	
+	if (end > src_size)
+	{
+		return 0;
+	}
+	
+	p = (const BYTE *)src;
+	d = (BYTE *)dst;
+	run = dst_size;
+	
+	while(run)
+	{
+		*d++ = *p;
+		p++;
+		run--;
+	}
+	
+	return 1;
+}
