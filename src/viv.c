@@ -240,6 +240,8 @@
 // *fix controls in view options page being 1 pixel too long
 // *fix jump-to up/down focus
 // *validate frame delay data
+// *use rename collision resolution name
+// *rename no to conflict should keep the rename dialog shown so user can continue with a different name.
 
 
 #define _VIV_WM_REPLY							(WM_USER+1)
@@ -7253,86 +7255,101 @@ static INT_PTR CALLBACK _viv_rename_proc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM
 			switch(LOWORD(wParam))
 			{
 				case IDOK:
-				{
-					wchar_t old_filename[STRING_SIZE];
-					wchar_t new_filename[STRING_SIZE];
-					wchar_t path[STRING_SIZE];
-					wchar_t new_full_path_and_filename[STRING_SIZE];
-					wchar_t *ext;
 					
-					GetDlgItemText(hwnd,IDC_RENAME_OLD_EDIT,old_filename,STRING_SIZE);
-					GetDlgItemText(hwnd,IDC_RENAME_EDIT,new_filename,STRING_SIZE);
-					
-					string_get_path_part(path,old_filename);
-					ext = string_get_extension(old_filename);
-					
-					string_path_combine(new_full_path_and_filename,path,new_filename);
-					if (*ext)
 					{
-						string_cat_utf8(new_full_path_and_filename,(const utf8_t *)".");
-						string_cat(new_full_path_and_filename,ext);
-					}
-					
-					if (string_compare(old_filename,new_full_path_and_filename) != 0)
-					{
-						SHFILEOPSTRUCT fo;
+						wchar_t old_filename[STRING_SIZE];
+						wchar_t new_filename[STRING_SIZE];
+						wchar_t path[STRING_SIZE];
+						wchar_t new_full_path_and_filename[STRING_SIZE];
+						wchar_t *ext;
+						int dont_end_dialog;
 						
-						wchar_t old_filename_list[STRING_SIZE+1];
-						wchar_t new_filename_list[STRING_SIZE+1];
+						GetDlgItemText(hwnd,IDC_RENAME_OLD_EDIT,old_filename,STRING_SIZE);
+						GetDlgItemText(hwnd,IDC_RENAME_EDIT,new_filename,STRING_SIZE);
 						
-						string_copy_double_null(old_filename_list,old_filename);
-						string_copy_double_null(new_filename_list,new_full_path_and_filename);
+						string_get_path_part(path,old_filename);
+						ext = string_get_extension(old_filename);
+						dont_end_dialog = 0;
 						
-						ZeroMemory(&fo,sizeof(SHFILEOPSTRUCT));
-						fo.hwnd = _viv_hwnd;
-						fo.wFunc = FO_RENAME;
-						fo.pFrom = old_filename_list;
-						fo.pTo = new_filename_list;
-						fo.fFlags = FOF_ALLOWUNDO | FOF_WANTMAPPINGHANDLE;
-
-						if (SHFileOperation(&fo) == 0)
+						string_path_combine(new_full_path_and_filename,path,new_filename);
+						if (*ext)
 						{
-							if (!fo.fAnyOperationsAborted)
-							{	
-								const wchar_t *file_op_new_name;
-								
-								file_op_new_name = new_full_path_and_filename;
-								
+							string_cat_utf8(new_full_path_and_filename,(const utf8_t *)".");
+							string_cat(new_full_path_and_filename,ext);
+						}
+						
+						if (string_compare(old_filename,new_full_path_and_filename) != 0)
+						{
+							SHFILEOPSTRUCT fo;
+							
+							wchar_t old_filename_list[STRING_SIZE+1];
+							wchar_t new_filename_list[STRING_SIZE+1];
+							
+							string_copy_double_null(old_filename_list,old_filename);
+							string_copy_double_null(new_filename_list,new_full_path_and_filename);
+							
+							ZeroMemory(&fo,sizeof(SHFILEOPSTRUCT));
+							fo.hwnd = _viv_hwnd;
+							fo.wFunc = FO_RENAME;
+							fo.pFrom = old_filename_list;
+							fo.pTo = new_filename_list;
+							fo.fFlags = FOF_ALLOWUNDO | FOF_WANTMAPPINGHANDLE;
+
+							// returns ERROR_CANCELLED if user cancelled.
+							if (SHFileOperation(&fo) == 0)
+							{
+								if (fo.fAnyOperationsAborted)
+								{
+									// user clicked No to a rename collision
+									// (not cancelled).
+									dont_end_dialog = 1;
+								}
+								else
+								{	
+									const wchar_t *file_op_new_name;
+									
+									file_op_new_name = new_full_path_and_filename;
+									
+									if (fo.hNameMappings)
+									{
+										_viv_name_mapping_t *mappings;
+										
+										mappings = (_viv_name_mapping_t *)fo.hNameMappings;
+											
+										if (mappings->count == 1)
+										{
+											// use the resolved name incase there was a rename collision.
+											file_op_new_name = mappings->mappings[0].pszNewPath;
+										}
+									}	
+									
+									// has the current file changed? slideshow could make this a different filename
+									if (string_compare(old_filename,_viv_current_fd->cFileName) == 0)
+									{
+										// rename
+										string_copy_with_bufsize(_viv_current_fd->cFileName,MAX_PATH,file_op_new_name);
+										
+										_viv_playlist_rename(old_filename,file_op_new_name);
+
+										_viv_update_title();
+									}						
+								}
+
 								if (fo.hNameMappings)
 								{
-									_viv_name_mapping_t *mappings;
-									
-									mappings = (_viv_name_mapping_t *)fo.hNameMappings;
-										
-									if (mappings->count == 1)
-									{
-										// use the resolved name incase there was a rename collision.
-										file_op_new_name = mappings->mappings[0].pszNewPath;
-									}
-								}	
-								
-								// has the current file changed? slideshow could make this a different filename
-								if (string_compare(old_filename,_viv_current_fd->cFileName) == 0)
-								{
-									// rename
-									string_copy_with_bufsize(_viv_current_fd->cFileName,MAX_PATH,file_op_new_name);
-									
-									_viv_playlist_rename(old_filename,file_op_new_name);
-
-									_viv_update_title();
-								}						
+									SHFreeNameMappings(fo.hNameMappings);
+								}							
 							}
+						}
 
-							if (fo.hNameMappings)
-							{
-								SHFreeNameMappings(fo.hNameMappings);
-							}							
+						if (!dont_end_dialog)
+						{
+							EndDialog(hwnd,1);
 						}
 					}
-
-					EndDialog(hwnd,1);
+					
 					break;
-				}
+				
 
 				case IDCANCEL:
 					EndDialog(hwnd,0);
